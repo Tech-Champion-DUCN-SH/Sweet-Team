@@ -1,0 +1,431 @@
+<!DOCTYPE html>
+<meta charset="utf-8">
+<style>
+
+rect {
+  fill: #fff;
+  stroke: steelblue;
+  stroke-width: 1.5px;
+}
+
+text {
+  font: 11px sans-serif;
+}
+
+</style>
+<body>
+<svg id="top" transform="scale(1)"></svg>
+
+<script src="d3.v3.min.js"></script>
+<script src="jquery-1.11.0.min.js"></script>
+
+<script>//<!--
+
+$("#top").click(function() {
+  $("#top").attr("transform", "scale(1)");
+});
+$("#top").dblclick(function() {
+  $("#top").attr("transform", "scale(2)");
+});
+
+var width = 1200,
+    height = 800;
+
+var svg = d3.select("svg#top")
+    .attr("width", width)
+    .attr("height", height)
+  .append("g")
+    .attr("transform", "translate(40,0)");
+
+function load_vm(instances, interfaces) {
+  var if_indx = {};
+  for (i in interfaces) {
+    var if_node = interfaces[i];
+    var if_uuid = if_node['iface-id'];
+    
+    if (if_uuid == null) continue;
+    if_indx[if_uuid] = if_node;
+  }
+  var vm_indx = {};
+  for (i in instances) {
+    var vm_uuid = i;
+    var vm_node = instances[i];
+    if (vm_node.name != null && vm_node.name.length > 0 &&
+        vm_node.device_id != null && vm_node.device_id.length > 0) {
+
+      for (j in vm_node.interfaces) {
+        var if_uuid = vm_node.interfaces[j];
+        var if_node = if_indx[if_uuid];
+        if (if_node == null) continue;
+        if_node.vm_node = vm_node;
+        vm_node.interfaces[j] = if_node;
+      }
+      vm_indx[i] = vm_node;
+    }
+  }
+  return vm_indx;
+}
+
+function load_br(bridges, ports, interfaces, peers) {
+  var br_indx = {};
+  for (i in bridges) {
+    var br_uuid = i;
+    var br_node = bridges[i];
+    for (j in br_node.ports) {
+      var pt_uuid = br_node.ports[j];
+      var pt_node = ports[pt_uuid];
+
+      br_node.ports[j] = pt_node;
+      if (pt_node != null) {
+        pt_node.bridge = br_node;
+      }
+      else {
+        br_node.ports.splice(j, 1);
+        continue;
+      }
+
+      for (k in pt_node.interfaces) {
+        var if_uuid = pt_node.interfaces[k];
+        var if_node = interfaces[if_uuid];
+        if (if_node != null) {
+          if_node.port = pt_node;
+          pt_node.interfaces[k] = if_node;
+        }
+        else {
+          pt_node.interfaces.splice(k, 1);
+          continue;
+        }
+      }
+    }
+    br_indx[i] = bridges[i];
+  }
+
+  for (i in peers) {
+    if (peers[i].length != 2) continue;
+    var p = peers[i];
+    interfaces[p[0]].peer = interfaces[p[1]];
+    interfaces[p[1]].peer = interfaces[p[0]];
+  }
+
+  return br_indx;
+}
+
+d3.json("conf.db.json.txt", function(error, root) {
+  var br_indx = load_br(root.bridges, root.ports, root.interfaces, root.peers);
+  var vm_indx = load_vm(root.instances, root.interfaces);
+
+  var nodes = [[], []];
+  var cache = {};
+  var links = {};
+  for (i in vm_indx) {
+    var vm_uuid = i;
+    var vm_node = vm_indx[i];
+
+    nodes[0].push(vm_node);
+    cache[vm_uuid] = vm_node;
+ 
+    for (j in vm_node.interfaces) {
+      var if_node = vm_node.interfaces[j];
+      if (if_node == null) continue;
+
+      var pt_node = if_node.port;
+      if (pt_node == null) continue;
+
+      var br_node = pt_node.bridge;
+      if (br_node == null) continue;
+
+      var pn_node = vm_node, pn_uuid = vm_uuid;
+      var ch_node = br_node;
+      if (links[pn_uuid] == null) links[pn_uuid] = {};
+      if (links[pn_uuid][ch_node._uuid] == null) links[pn_uuid][ch_node._uuid] = { s:pn_node, t:ch_node, l:[] };
+      links[pn_uuid][ch_node._uuid].l.push(if_node);
+
+      if (cache[ch_node._uuid] == null) {
+        nodes[1].push(ch_node);
+        cache[ch_node._uuid] = ch_node;
+      }
+    }
+  }
+
+  for (i = 1; nodes[i].length > 0; ++i) {
+    nodes[i + 1] = [];
+    for (j in nodes[i]) {
+      var br_node = nodes[i][j];
+      for (k in br_node.ports) {
+        var pt_node = br_node.ports[k];
+        for (l in pt_node.interfaces) {
+          var if_node = pt_node.interfaces[l];
+          var pr_node = if_node.peer;
+          if (pr_node != null &&
+              pr_node.port != null &&
+              pr_node.port.bridge != null) {
+
+            var pn_node = br_node, pn_uuid = pn_node._uuid;
+            var ch_node = pr_node.port.bridge;
+            if (links[pn_uuid] == null) links[pn_uuid] = {};
+            if (links[pn_uuid][ch_node._uuid] == null) links[pn_uuid][ch_node._uuid] = { s:pn_node, t:ch_node, l:[] };
+            links[pn_uuid][ch_node._uuid].l.push(pr_node);
+
+            if (cache[ch_node._uuid] == null) {
+              nodes[i + 1].push(ch_node);
+              cache[ch_node._uuid] = ch_node;
+            }
+          }
+        }
+      }
+    }
+  }
+  nodes.pop();
+
+  var lines = [], skip = {}, tags = [];
+  for (i in links) {
+    for (j in links[i]) {
+      var ln_node = links[i][j];
+      var pn_uuid = i, ch_uuid = j;
+      var pn_node = ln_node.s;
+      var ch_node = ln_node.t;
+
+      if (skip[ch_uuid] != null) continue; 
+      skip[pn_uuid] = pn_node;
+
+      for (k in ln_node.l) {
+        var ends = [];
+        [ ln_node.l[k], ln_node.l[k].peer ].map(function(if_node) {
+          if (if_node != null) {
+            if (if_node.vm_node != null) {
+              var vm_node = if_node.vm_node;
+              vm_node.children = vm_node.children || [];
+              vm_node.children.push(if_node);
+              vm_node.w = Math.max(vm_node.w, vm_node.children.length * 20);
+
+              ends.push(if_node);
+            }
+
+            if (if_node.port != null && if_node.port.bridge != null) {
+              var br_node = if_node.port.bridge;
+              br_node.children = br_node.children || [];
+              br_node.children.push(if_node.port);
+              br_node.w = Math.max(br_node.w, br_node.children.length * 20);
+
+              ends.push(if_node.port);
+            }
+          }
+        });
+
+        lines.push(ends);
+      }
+    }
+  }
+
+  for (i in root.ports) {
+    pr_node = root.ports[i];
+    if (pr_node.interfaces == null) continue;
+    for (j = 0; j < pr_node.interfaces.length; ++j) {
+      var if_node = pr_node.interfaces[j];
+      if (if_node.vm_node != null) break;
+      if (if_node.peer != null) break;
+      if (if_node.device_type != "") break;
+    }
+    if (j < pr_node.interfaces.length) continue;
+    if (pr_node != null && pr_node.bridge != null) {
+      var br_node = pr_node.bridge;
+      br_node.children = br_node.children || [];
+      br_node.children.unshift(pr_node);
+      br_node.w = Math.max(br_node.w, br_node.children.length * 20);
+    }
+  }
+
+  for (i = 1; i < nodes.length; ++i) {
+    for (j in nodes[i]) {
+      br_node = nodes[i][j];
+      tags = {};
+      for (k in br_node.children) {
+        pt_node = br_node.children[k];
+        if (pt_node.tag == null || pt_node.tag.length == 0) continue;
+        tags[pt_node.tag] = tags[pt_node.tag] || [] 
+        tags[pt_node.tag].push(pt_node); 
+      }
+      for (k in tags) {
+        r = Math.floor(Math.random() * 256);
+        g = Math.floor(Math.random() * 255);
+        b = Math.floor(Math.random() * 255);
+        color = "rgb(" + r + "," + g + "," + b + ")";
+        for (l in tags[k]) {
+          tags[k][l].color = color;
+        }
+      }
+    }
+  } 
+
+  var group, cursor = {x:0, y:0};
+
+  group = svg.selectAll(".instance")
+      .data(nodes[0])
+    .enter().append("g")
+      .attr("class", "instance")
+      .datum(function(d) {
+        d.x = cursor.x;
+        d.y = cursor.y;
+        d.w = Math.max(60, 20 + d.children.length * 15);
+        d.h = 40;
+        cursor.x += d.w + 20;
+ 
+        for (i in d) {
+          d[i].x = d.x + 20 + i * 15;
+          d[i].y = d.y;
+        }
+
+        return d;        
+      });
+
+  group.append("rect")
+      .attr("x", function(d) { return d.x; })
+      .attr("y", function(d) { return d.y; })
+      .attr("height", function(d) { return d.h; })
+      .attr("width", function(d) { return d.w; });
+
+  group.append("text")
+      .attr("x", function(d) { return d.x + 10; })
+      .attr("y", function(d) { return d.y + 20; })
+      .attr("text-anchor", "start")
+      .text(function(d) { return d.name; }); 
+
+  group.selectAll(".port")
+      .data(function(d) {
+        for (i in d.children) {
+          var p = d.children[i];
+          p.x = d.x + i * 15 + 10;
+          p.y = d.y + 30;
+        }
+        return d.children;
+      })
+    .enter().append("g")
+      .attr("class", "port")
+    .append("rect")
+      .attr("x", function(d) { return d.x; })
+      .attr("y", function(d) { return d.y; })
+      .attr("height", "10")
+      .attr("width", "10");
+
+  cursor = {x:0, y:0};
+  var layer = svg.selectAll(".layer")
+      .data(nodes)
+    .enter().append("g")
+      .attr("class", "layer")
+      .filter(function(d, i) { return i != 0; })
+      .datum(function(d, i) {
+        if (!i) cursor.y = 140;
+
+        d.x = 0;
+        d.y = cursor.y;
+        cursor.y += 150;
+
+        for (i in d) { 
+          d[i].y = d.y;
+        }
+        return d;
+      });
+
+  layer.selectAll(".bridge")
+      .data(function(d) { return d; })
+    .enter().append("g")
+      .attr("class", "bridge")
+      .datum(function(d, i) {
+        if (!i) cursor.x = 0;
+
+        d.x = cursor.x;
+        d.w = Math.max(60, 60 + d.children.length * 15);
+        d.h = 30;
+        cursor.x = cursor.x + d.w + 20;
+
+        return d; 
+      })
+    .append("rect")
+      .attr("x", function(d) { return d.x; })
+      .attr("y", function(d) { return d.y; })
+      .attr("width", function(d) { return d.w; })
+      .attr("height", function(d) { return d.h; });
+
+  layer.selectAll(".bridge")
+    .append("text")
+      .attr("x", function(d) { return d.x + 10; })
+      .attr("y", function(d) { return d.y + 20; })
+      .attr("text-anchor", "start")
+      .text(function(d) { return d.name; }); 
+
+  layer.selectAll(".bridge").selectAll(".port")
+      .data(function(d) {
+        for (i in d.children) {
+          var p = d.children[i];
+          p.x = d.x + i * 15 + 50;
+          p.y = d.y + 10;
+
+          if (p.interfaces) {
+            for (i in p.interfaces) {
+              var if_node = p.interfaces[i];
+              if (if_node.device_type == "") p.y += 20;
+            }
+          }
+        }
+        return d.children;
+      })
+    .enter().append("g")
+      .attr("class", "port")
+    .append("rect")
+      .attr("x", function(d) { return d.x; })
+      .attr("y", function(d) { return d.y; })
+      .attr("height", "10")
+      .attr("width", "10");
+
+ svg.selectAll(".line")
+     .data(lines)
+   .enter().append("path")
+     .attr("class", "line")
+     .attr("stroke", "rgb(69,72,70)")
+     .attr("fill", "none")
+     .attr("d", function(d) { 
+        var x1 = d[0].x + 5, y1 = d[0].y + 5;
+        var x2 = d[1].x + 5, y2 = d[1].y + 5;
+        return "M " + x1 + "," + y1 + " " + x2 + "," + y2;
+     });
+
+  svg.selectAll(".port")
+    .filter(function(d) { return d.color != null; })
+    .attr("stroke-width", "0.5px")
+    .attr("stroke", function(d) { return d.color; });
+
+  svg.selectAll(".port")
+    .datum(function(d) {
+      if (d.name == null) {
+        var label = "";
+        if (d.interfaces != null) {
+          for (i in d.interfaces) {
+            var if_node = d.interfaces[i];
+            label += if_node.name;
+            label += " ";
+          }
+          if (d.tag != null && d.tag.length){ label = "[valn:" + d.tag + "]" + label; }
+        }
+        d.label = label;
+      }
+      else d.label = d.name;
+      return d;
+    })
+    .append("text")
+    .attr("transform", function(d) { return "rotate(60 " + (d.x - 18) + "," + (d.y + 15) + ")"; })
+    .attr("x", function(d) { return d.x; })
+    .attr("y", function(d) { return d.y; })
+    .attr("text-anchor", "start")
+    .text(function(d) { return d.label; });
+
+
+ svg.selectAll(".line")
+     .attr("stroke", function(d) {
+console.log(d);
+        if (d[0].color) return d[0].color;
+        if (d[1].color) return d[1].color;
+        return "#000000";
+     });
+   
+});  
+//--></script>
